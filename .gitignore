@@ -6,9 +6,6 @@
 #02 fact check/gstbot/gst_results/
 #02 fact check/gstbot/gst_results/gst_27AAACR5055K1Z7.csv
 #02 fact check/gstbot/27AABCZ1506C1ZQ.json
-# Large local binaries/models
-#02 fact check/gstbot/ffmpeg.exe
-#02 fact check/gstbot/model/base.pt
 
 # Python bytecode and caches
 __pycache__/
