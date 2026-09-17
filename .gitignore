@@ -1,0 +1,51 @@
+# Ignore the scrapper v1 project folder
+# (Folder name contains spaces and #, so keep the trailing slash.)
+#01 scrapper v1/
+
+# Generated GST results and data
+#02 fact check/gstbot/gst_results/
+#02 fact check/gstbot/gst_results/gst_27AAACR5055K1Z7.csv
+#02 fact check/gstbot/27AABCZ1506C1ZQ.json
+# Large local binaries/models
+#02 fact check/gstbot/ffmpeg.exe
+#02 fact check/gstbot/model/base.pt
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Packaging/build artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs and local output
+*.log
+logs/
+output/
+outputs/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
