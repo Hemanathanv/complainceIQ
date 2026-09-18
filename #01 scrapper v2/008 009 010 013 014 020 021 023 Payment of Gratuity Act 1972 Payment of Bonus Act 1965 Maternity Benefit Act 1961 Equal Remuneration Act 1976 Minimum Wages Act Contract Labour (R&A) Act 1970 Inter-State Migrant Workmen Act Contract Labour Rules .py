@@ -4,7 +4,10 @@ from pathlib import Path
 from datetime import datetime
 from urllib.parse import urljoin, unquote, urlparse, parse_qs
 import os
+import json
+import random
 import re
+import time
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
@@ -23,7 +26,82 @@ if ENV_FILE.exists():
             os.environ.setdefault(key.strip(), value.strip().strip('"'))
 
 DOWNLOAD_BASE = Path(os.environ.get("DOWNLOAD_BASE_PATH", SCRIPT_DIR))
-BASE = DOWNLOAD_BASE / Path(__file__).stem
+# The source filename is longer than the Windows path limit once category
+# folders and PDF filenames are appended, so use a stable compact parent.
+BASE = DOWNLOAD_BASE / "008 009 010 013 014 020 021 023 Labour Acts"
+RUNTIME_DIR = BASE / "logs"
+RUN_STATUS = RUNTIME_DIR / "run_status.json"
+RUNTIME_LOG = RUNTIME_DIR / "runtime.log"
+RESILIENCE_ATTEMPTS = int(os.environ.get("SCRAPER_MAX_ATTEMPTS", "3"))
+REQUEST_DELAY_SECONDS = float(os.environ.get("SCRAPER_REQUEST_DELAY_SECONDS", "1.0"))
+BLOCK_COOLDOWN = float(os.environ.get("SCRAPER_BLOCK_COOLDOWN_SECONDS", "300"))
+
+
+class SiteAccessBlocked(RuntimeError):
+    pass
+
+
+BLOCK_DETECTED = ""
+
+
+def check_response_status(status, url=""):
+    global BLOCK_DETECTED
+    if status in {403, 429}:
+        BLOCK_DETECTED = f"HTTP {status} from {url}"
+        raise SiteAccessBlocked(BLOCK_DETECTED)
+
+
+def safe_goto(page, url, **kwargs):
+    time.sleep(REQUEST_DELAY_SECONDS + random.uniform(0, 0.35))
+    response = page.goto(url, **kwargs)
+    if response is not None:
+        check_response_status(response.status, url)
+    return response
+
+
+def guarded_request_get(context, url, **kwargs):
+    time.sleep(REQUEST_DELAY_SECONDS + random.uniform(0, 0.35))
+    response = context.request.get(url, **kwargs)
+    check_response_status(response.status, url)
+    return response
+
+
+def write_run_status(state, message="", attempt=0):
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    payload = {"script": Path(__file__).name, "state": state, "attempt": attempt,
+               "message": str(message), "timestamp": stamp}
+    temporary = RUN_STATUS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(RUN_STATUS)
+    with RUNTIME_LOG.open("a", encoding="utf-8") as stream:
+        stream.write(f"{stamp} | {state} | attempt={attempt} | {message}\n")
+
+
+def guarded_main(entrypoint):
+    global BLOCK_DETECTED
+    for attempt in range(1, RESILIENCE_ATTEMPTS + 1):
+        BLOCK_DETECTED = ""
+        write_run_status("running", attempt=attempt)
+        try:
+            result = entrypoint()
+            if BLOCK_DETECTED:
+                raise SiteAccessBlocked(BLOCK_DETECTED)
+            write_run_status("completed", attempt=attempt)
+            return result
+        except KeyboardInterrupt:
+            write_run_status("stopped", "Stopped by user", attempt)
+            raise
+        except SiteAccessBlocked as error:
+            write_run_status("blocked", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(BLOCK_COOLDOWN + random.uniform(0, 5))
+        except Exception as error:
+            write_run_status("error", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(min(120, 5 * (2 ** (attempt - 1))) + random.uniform(0, 2))
 
 CIRCULAR_FOLDER = BASE / "Circulars"
 ACTS_FOLDER = BASE / "Acts"
@@ -186,7 +264,7 @@ def save_pdf_silently(context, pdf_url, folder, title):
 
     try:
 
-        response = context.request.get(
+        response = guarded_request_get(context,
             pdf_url,
             timeout=60000
         )
@@ -247,7 +325,7 @@ def circulars(context):
 
         try:
 
-            page.goto(
+            safe_goto(page,
                 url,
                 wait_until="domcontentloaded",
                 timeout=60000
@@ -325,7 +403,7 @@ def circulars(context):
                 # Get node page WITHOUT opening it
                 try:
 
-                    response = context.request.get(
+                    response = guarded_request_get(context,
                         url2,
                         timeout=60000
                     )
@@ -358,7 +436,7 @@ def circulars(context):
                         # CLC circular pages embed the PDF in PDF.js.
                         doc_page = context.new_page()
                         try:
-                            doc_page.goto(url2, wait_until="domcontentloaded", timeout=60000)
+                            safe_goto(doc_page, url2, wait_until="domcontentloaded", timeout=60000)
                             doc_page.wait_for_timeout(1200)
                             viewer = doc_page.locator("iframe[src*='pdf.js']").first
                             viewer_src = viewer.get_attribute("src") if viewer.count() else None
@@ -493,7 +571,7 @@ def open_act_pdf(
     try:
 
         # Open PDF in Chrome PDF Viewer
-        page.goto(
+        safe_goto(page,
             pdf_url,
             wait_until="domcontentloaded",
             timeout=60000
@@ -506,7 +584,7 @@ def open_act_pdf(
         )
 
         # Save actual PDF
-        response = context.request.get(
+        response = guarded_request_get(context,
             pdf_url,
             timeout=60000
         )
@@ -586,7 +664,7 @@ def create_act_pdf(
             "CREATING PDF FROM ACT CONTENT"
         )
 
-        page.goto(
+        safe_goto(page,
             url,
             wait_until="networkidle",
             timeout=60000
@@ -697,7 +775,7 @@ def acts(context):
 
     try:
 
-        acts_page.goto(
+        safe_goto(acts_page,
             ACTS_URL,
             wait_until="domcontentloaded",
             timeout=60000
@@ -817,7 +895,7 @@ def acts(context):
 
             try:
 
-                act_page.goto(
+                safe_goto(act_page,
                     act_url,
                     wait_until="domcontentloaded",
                     timeout=60000
@@ -1012,7 +1090,7 @@ def main():
 
         home = context.new_page()
 
-        home.goto(
+        safe_goto(home,
             CLC_HOME,
             wait_until="domcontentloaded",
             timeout=60000
@@ -1097,8 +1175,4 @@ def main():
 # ==========================================================
 
 if __name__ == "__main__":
-    main()
-
-
-
-
+    guarded_main(main)

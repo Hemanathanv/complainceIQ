@@ -17,6 +17,8 @@ import base64
 import re
 import sys
 import os
+import json
+import random
 import time
 
 from playwright.sync_api import sync_playwright
@@ -69,6 +71,64 @@ if ENV_FILE.exists():
             key, value = line.split("=", 1)
             os.environ.setdefault(key.strip(), value.strip().strip('"'))
 ROOT_FOLDER = Path(os.environ.get("DOWNLOAD_BASE_PATH", SCRIPT_DIR)) / Path(__file__).stem
+RUNTIME_DIR = ROOT_FOLDER / "logs"
+RUN_STATUS = RUNTIME_DIR / "run_status.json"
+RUNTIME_LOG = RUNTIME_DIR / "runtime.log"
+RESILIENCE_ATTEMPTS = int(os.environ.get("SCRAPER_MAX_ATTEMPTS", "3"))
+REQUEST_DELAY_SECONDS = float(os.environ.get("SCRAPER_REQUEST_DELAY_SECONDS", "1.0"))
+BLOCK_COOLDOWN = float(os.environ.get("SCRAPER_BLOCK_COOLDOWN_SECONDS", "300"))
+
+
+class SiteAccessBlocked(RuntimeError):
+    pass
+
+
+BLOCK_DETECTED = ""
+
+
+def check_response_status(status, url=""):
+    global BLOCK_DETECTED
+    if status in {403, 429}:
+        BLOCK_DETECTED = f"HTTP {status} from {url}"
+        raise SiteAccessBlocked(BLOCK_DETECTED)
+
+
+def write_run_status(state, message="", attempt=0):
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    payload = {"script": Path(__file__).name, "state": state, "attempt": attempt,
+               "message": str(message), "timestamp": stamp}
+    temporary = RUN_STATUS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(RUN_STATUS)
+    with RUNTIME_LOG.open("a", encoding="utf-8") as stream:
+        stream.write(f"{stamp} | {state} | attempt={attempt} | {message}\n")
+
+
+def guarded_main(entrypoint):
+    global BLOCK_DETECTED
+    for attempt in range(1, RESILIENCE_ATTEMPTS + 1):
+        BLOCK_DETECTED = ""
+        write_run_status("running", attempt=attempt)
+        try:
+            result = entrypoint()
+            if BLOCK_DETECTED:
+                raise SiteAccessBlocked(BLOCK_DETECTED)
+            write_run_status("completed", attempt=attempt)
+            return result
+        except KeyboardInterrupt:
+            write_run_status("stopped", "Stopped by user", attempt)
+            raise
+        except SiteAccessBlocked as error:
+            write_run_status("blocked", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(BLOCK_COOLDOWN + random.uniform(0, 5))
+        except Exception as error:
+            write_run_status("error", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(min(120, 5 * (2 ** (attempt - 1))) + random.uniform(0, 2))
 
 HAZARDOUS_WASTE_RULES_FOLDER = ROOT_FOLDER / "Hazardous waste Rules"
 OTHER_WASTE_FOLDER = HAZARDOUS_WASTE_RULES_FOLDER / "Other waste"
@@ -441,6 +501,9 @@ def init_excel_workbook():
     if EXCEL_LOG_PATH.exists():
         try:
             EXCEL_WORKBOOK = load_workbook(EXCEL_LOG_PATH)
+        except SiteAccessBlocked:
+            raise
+
         except Exception as e:
             print(f"Could not open existing Excel log ({e}) — starting a fresh workbook.")
             EXCEL_WORKBOOK = Workbook()
@@ -777,7 +840,9 @@ def save_pdf_from_link(
 
         try:
 
+            time.sleep(REQUEST_DELAY_SECONDS + random.uniform(0, 0.35))
             response = context.request.get(pdf_url, timeout=60000)
+            check_response_status(response.status, pdf_url)
 
             print(f"Attempt {attempt}/{max_retries} — Response Status: {response.status}")
 
@@ -904,7 +969,9 @@ def retry_failed_downloads(context, max_retries=3):
 
             try:
 
+                time.sleep(REQUEST_DELAY_SECONDS + random.uniform(0, 0.35))
                 response = context.request.get(pdf_url, timeout=60000)
+                check_response_status(response.status, pdf_url)
 
                 if response.ok:
 
@@ -931,6 +998,9 @@ def retry_failed_downloads(context, max_retries=3):
                             )
                             recovered = True
                             break
+
+            except SiteAccessBlocked:
+                raise
 
             except Exception as e:
                 print(f"Retry attempt {attempt} error: {e}")
@@ -1561,5 +1631,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-    main()
+    guarded_main(main)
     

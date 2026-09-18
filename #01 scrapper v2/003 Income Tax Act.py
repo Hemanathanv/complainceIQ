@@ -17,7 +17,10 @@ The default setting processes all available records. To limit a test run:
 """
 
 import os
+import json
+import random
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
@@ -36,6 +39,71 @@ if ENV_FILE.exists():
             os.environ.setdefault(key.strip(), value.strip().strip('"'))
 
 BASE = Path(os.environ.get("DOWNLOAD_BASE_PATH", SCRIPT_DIR)) / Path(__file__).stem
+RUNTIME_DIR = BASE / "logs"
+RUN_STATUS = RUNTIME_DIR / "run_status.json"
+RUNTIME_LOG = RUNTIME_DIR / "runtime.log"
+RESILIENCE_ATTEMPTS = int(os.environ.get("SCRAPER_MAX_ATTEMPTS", "3"))
+REQUEST_DELAY = float(os.environ.get("SCRAPER_REQUEST_DELAY_SECONDS", "1.0"))
+BLOCK_COOLDOWN = float(os.environ.get("SCRAPER_BLOCK_COOLDOWN_SECONDS", "300"))
+
+
+class SiteAccessBlocked(RuntimeError):
+    pass
+
+
+BLOCK_DETECTED = ""
+
+
+def check_response_status(status, url=""):
+    global BLOCK_DETECTED
+    if status in {403, 429}:
+        BLOCK_DETECTED = f"HTTP {status} from {url}"
+        raise SiteAccessBlocked(BLOCK_DETECTED)
+
+
+def safe_goto(page, url, **kwargs):
+    time.sleep(REQUEST_DELAY + random.uniform(0, 0.35))
+    response = page.goto(url, **kwargs)
+    if response is not None:
+        check_response_status(response.status, url)
+    return response
+
+
+def write_run_status(state, message="", attempt=0):
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {"script": Path(__file__).name, "state": state, "attempt": attempt,
+               "message": str(message), "timestamp": datetime.now().astimezone().isoformat(timespec="seconds")}
+    temporary = RUN_STATUS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(RUN_STATUS)
+    with RUNTIME_LOG.open("a", encoding="utf-8") as stream:
+        stream.write(f"{payload['timestamp']} | {state} | attempt={attempt} | {message}\n")
+
+
+def guarded_main(entrypoint):
+    global BLOCK_DETECTED
+    for attempt in range(1, RESILIENCE_ATTEMPTS + 1):
+        BLOCK_DETECTED = ""
+        write_run_status("running", attempt=attempt)
+        try:
+            result = entrypoint()
+            if BLOCK_DETECTED:
+                raise SiteAccessBlocked(BLOCK_DETECTED)
+            write_run_status("completed", attempt=attempt)
+            return result
+        except KeyboardInterrupt:
+            write_run_status("stopped", "Stopped by user", attempt)
+            raise
+        except SiteAccessBlocked as error:
+            write_run_status("blocked", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(BLOCK_COOLDOWN + random.uniform(0, 5))
+        except Exception as error:
+            write_run_status("error", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(min(120, 5 * (2 ** (attempt - 1))) + random.uniform(0, 2))
 ACT_FOLDER = BASE / "Acts"
 CIRCULAR_FOLDER = BASE / "Circulars"
 NOTIFICATION_FOLDER = BASE / "Notifications"
@@ -123,7 +191,7 @@ def extract_records(page, category):
 def download_from_detail(context, record, folder, number):
     detail = context.new_page()
     try:
-        detail.goto(record["href"], wait_until="domcontentloaded", timeout=TIMEOUT)
+        safe_goto(detail, record["href"], wait_until="domcontentloaded", timeout=TIMEOUT)
         detail.wait_for_timeout(1200)
         pdf_links = detail.locator("a[href*='.pdf'], a[href*='.PDF']")
         if pdf_links.count():
@@ -243,9 +311,9 @@ def download_from_card(context, page, trigger, folder, number, name):
 
 
 def collect_category(context, page, category, source_url, folder, rows):
-    page.goto(HOME_URL, wait_until="commit", timeout=TIMEOUT)
+    safe_goto(page, HOME_URL, wait_until="commit", timeout=TIMEOUT)
     page.wait_for_timeout(1500)
-    page.goto(source_url, wait_until="commit", timeout=TIMEOUT)
+    safe_goto(page, source_url, wait_until="commit", timeout=TIMEOUT)
     cards = page.locator("#listViewContent .card")
     title_buttons = page.locator("#listViewContent button.card-title")
     for _ in range(16):
@@ -333,7 +401,7 @@ def write_audit(rows):
 
 def collect_act_year(context, page, year, rows):
     """Download every section for one Finance Act amendment year."""
-    page.goto(ACT_URL, wait_until="domcontentloaded", timeout=TIMEOUT)
+    safe_goto(page, ACT_URL, wait_until="domcontentloaded", timeout=TIMEOUT)
     page.wait_for_timeout(2500)
     year_box = page.get_by_role("combobox").nth(1)
     year_box.click()
@@ -389,7 +457,7 @@ def save_act_pdf():
     with sync_playwright() as p:
         browser = p.chromium.launch(channel="chrome", headless=True)
         page = browser.new_page(viewport={"width": 1366, "height": 900})
-        page.goto(ACT_URL, wait_until="domcontentloaded", timeout=TIMEOUT)
+        safe_goto(page, ACT_URL, wait_until="domcontentloaded", timeout=TIMEOUT)
         page.wait_for_timeout(5000)
         page.pdf(path=str(path), format="A4", print_background=True)
         browser.close()
@@ -419,4 +487,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    guarded_main(main)

@@ -1,5 +1,7 @@
 from pathlib import Path
 import os
+import json
+import random
 from urllib.parse import urljoin, urlparse, unquote, parse_qs
 import base64
 from datetime import datetime
@@ -32,6 +34,64 @@ if ENV_FILE.exists():
             key, value = line.split("=", 1)
             os.environ.setdefault(key.strip(), value.strip().strip('"'))
 WCD = Path(os.environ.get("DOWNLOAD_BASE_PATH", SCRIPT_DIR)) / Path(__file__).stem
+RUNTIME_DIR = WCD / "logs"
+RUN_STATUS = RUNTIME_DIR / "run_status.json"
+RUNTIME_LOG = RUNTIME_DIR / "runtime.log"
+RESILIENCE_ATTEMPTS = int(os.environ.get("SCRAPER_MAX_ATTEMPTS", "3"))
+REQUEST_DELAY_SECONDS = float(os.environ.get("SCRAPER_REQUEST_DELAY_SECONDS", "1.0"))
+BLOCK_COOLDOWN = float(os.environ.get("SCRAPER_BLOCK_COOLDOWN_SECONDS", "300"))
+
+
+class SiteAccessBlocked(RuntimeError):
+    pass
+
+
+BLOCK_DETECTED = ""
+
+
+def check_response_status(status, url=""):
+    global BLOCK_DETECTED
+    if status in {403, 429}:
+        BLOCK_DETECTED = f"HTTP {status} from {url}"
+        raise SiteAccessBlocked(BLOCK_DETECTED)
+
+
+def write_run_status(state, message="", attempt=0):
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    payload = {"script": Path(__file__).name, "state": state, "attempt": attempt,
+               "message": str(message), "timestamp": stamp}
+    temporary = RUN_STATUS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(RUN_STATUS)
+    with RUNTIME_LOG.open("a", encoding="utf-8") as stream:
+        stream.write(f"{stamp} | {state} | attempt={attempt} | {message}\n")
+
+
+def guarded_main(entrypoint):
+    global BLOCK_DETECTED
+    for attempt in range(1, RESILIENCE_ATTEMPTS + 1):
+        BLOCK_DETECTED = ""
+        write_run_status("running", attempt=attempt)
+        try:
+            result = entrypoint()
+            if BLOCK_DETECTED:
+                raise SiteAccessBlocked(BLOCK_DETECTED)
+            write_run_status("completed", attempt=attempt)
+            return result
+        except KeyboardInterrupt:
+            write_run_status("stopped", "Stopped by user", attempt)
+            raise
+        except SiteAccessBlocked as error:
+            write_run_status("blocked", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(BLOCK_COOLDOWN + random.uniform(0, 5))
+        except Exception as error:
+            write_run_status("error", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(min(120, 5 * (2 ** (attempt - 1))) + random.uniform(0, 2))
 NOTIFICATION = WCD / "notification"
 ACT = WCD / "act"
 RULES = WCD / "rules"
@@ -564,6 +624,7 @@ def download(page, url, folder, title, excel_sheet_name, category=""):
             # sending one matching the page we found the link on
             # is what a real click would send, and costs nothing
             # for URLs that don't need it.
+            time.sleep(REQUEST_DELAY_SECONDS + random.uniform(0, 0.35))
             response = page.context.request.get(
                 url,
                 timeout=60000,
@@ -592,6 +653,7 @@ def download(page, url, folder, title, excel_sheet_name, category=""):
                 # a non-200 status. Surface exactly what came back
                 # so the real cause is visible instead of a bare
                 # "FAILED" with no explanation.
+                check_response_status(response.status, pdf_url)
                 content_type = response.headers.get("content-type", "")
                 snippet = data[:120].decode("utf-8", errors="replace") if data else ""
                 print(
@@ -1099,4 +1161,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    guarded_main(main)

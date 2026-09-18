@@ -1,4 +1,4 @@
-`"""Download GST documents from the CBIC Tax Information Portal.
+"""Download GST documents from the CBIC Tax Information Portal.
 
 Install once:
     py -m pip install requests playwright
@@ -20,9 +20,11 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -45,6 +47,87 @@ if ENV_FILE.exists():
             os.environ[key.strip()] = value.strip().strip('"')
 DOWNLOAD_BASE = Path(os.environ.get("DOWNLOAD_BASE_PATH", SCRIPT_DIR))
 DEFAULT_OUTPUT = DOWNLOAD_BASE / Path(__file__).stem
+RUNTIME_DIR = DEFAULT_OUTPUT / "logs"
+RUN_STATUS = RUNTIME_DIR / "run_status.json"
+RUNTIME_LOG = RUNTIME_DIR / "runtime.log"
+RESILIENCE_ATTEMPTS = int(os.environ.get("SCRAPER_MAX_ATTEMPTS", "3"))
+REQUEST_DELAY = float(os.environ.get("SCRAPER_REQUEST_DELAY_SECONDS", "1.0"))
+BLOCK_COOLDOWN = float(os.environ.get("SCRAPER_BLOCK_COOLDOWN_SECONDS", "300"))
+
+
+class SiteAccessBlocked(RuntimeError):
+    pass
+
+
+BLOCK_DETECTED = ""
+
+
+def check_response_status(status, url=""):
+    global BLOCK_DETECTED
+    if status in {403, 429}:
+        BLOCK_DETECTED = f"HTTP {status} from {url}"
+        raise SiteAccessBlocked(BLOCK_DETECTED)
+
+
+def resilient_get(session, url, **kwargs):
+    last_error = None
+    for attempt in range(1, RESILIENCE_ATTEMPTS + 1):
+        time.sleep(REQUEST_DELAY + random.uniform(0, 0.35))
+        try:
+            response = session.get(url, **kwargs)
+            check_response_status(response.status_code, url)
+            if response.status_code < 500 or attempt == RESILIENCE_ATTEMPTS:
+                return response
+            last_error = RuntimeError(f"HTTP {response.status_code} from {url}")
+        except SiteAccessBlocked:
+            raise
+        except Exception as error:
+            last_error = error
+        if attempt < RESILIENCE_ATTEMPTS:
+            time.sleep(min(120, 5 * (2 ** (attempt - 1))) + random.uniform(0, 2))
+    raise last_error or RuntimeError(f"Request failed: {url}")
+
+
+def write_run_status(state, message="", attempt=0):
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    payload = {"script": Path(__file__).name, "state": state, "attempt": attempt,
+               "message": str(message), "timestamp": stamp}
+    temporary = RUN_STATUS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(RUN_STATUS)
+    with RUNTIME_LOG.open("a", encoding="utf-8") as stream:
+        stream.write(f"{stamp} | {state} | attempt={attempt} | {message}\n")
+
+
+def guarded_main(entrypoint):
+    global BLOCK_DETECTED
+    last_code = 1
+    for attempt in range(1, RESILIENCE_ATTEMPTS + 1):
+        BLOCK_DETECTED = ""
+        write_run_status("running", attempt=attempt)
+        try:
+            last_code = entrypoint()
+            if BLOCK_DETECTED:
+                raise SiteAccessBlocked(BLOCK_DETECTED)
+            if last_code == 0:
+                write_run_status("completed", attempt=attempt)
+                return 0
+            raise RuntimeError(f"Scraper returned exit code {last_code}")
+        except KeyboardInterrupt:
+            write_run_status("stopped", "Stopped by user", attempt)
+            raise
+        except SiteAccessBlocked as error:
+            write_run_status("blocked", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                return max(3, last_code)
+            time.sleep(BLOCK_COOLDOWN + random.uniform(0, 5))
+        except Exception as error:
+            write_run_status("error", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                return max(2, last_code)
+            time.sleep(min(120, 5 * (2 ** (attempt - 1))) + random.uniform(0, 2))
+    return max(2, last_code)
 AUDIT_FILE = DEFAULT_OUTPUT / "GST_Audit.xlsx"
 LAST_OUTPUT_ROOT = DEFAULT_OUTPUT
 REQUEST_DELAY_SECONDS = 0.35
@@ -139,7 +222,7 @@ def token(session: requests.Session) -> str:
 
 
 def get_json(session: requests.Session, jwt: str, api_path: str):
-    response = session.get(
+    response = resilient_get(session,
         urljoin(BASE_URL, api_path),
         headers={"Authorization": f"Bearer {jwt}"},
         timeout=TIMEOUT_SECONDS,
@@ -881,7 +964,7 @@ def download_pdf(session: requests.Session, record: dict) -> bytes:
     last_error = None
     for attempt in range(3):
         try:
-            response = session.get(record["url"], timeout=TIMEOUT_SECONDS)
+            response = resilient_get(session, record["url"], timeout=TIMEOUT_SECONDS)
             response.raise_for_status()
             if response.content.startswith(b"%PDF"):
                 return response.content
@@ -891,7 +974,7 @@ def download_pdf(session: requests.Session, record: dict) -> bytes:
             if encoded:
                 return base64.b64decode(encoded)
             if record.get("formId"):
-                response = session.get(
+                response = resilient_get(session,
                     urljoin(BASE_URL, f"api/cbic-form-msts/download/{record['formId']}/ENG"),
                     timeout=TIMEOUT_SECONDS,
                 )
@@ -913,7 +996,7 @@ def download_content(session: requests.Session, jwt: str, path: str) -> bytes:
     last_error = None
     for attempt in range(3):
         try:
-            response = session.get(
+            response = resilient_get(session,
                 document_url(path),
                 headers={"Authorization": f"Bearer {jwt}", "Accept": "application/json, application/pdf, */*"},
                 timeout=TIMEOUT_SECONDS,
@@ -939,7 +1022,7 @@ def download_form_english(session: requests.Session, jwt: str, form_id: int) -> 
     last_error = None
     for attempt in range(3):
         try:
-            response = session.get(
+            response = resilient_get(session,
                 urljoin(BASE_URL, f"api/cbic-form-msts/download/{form_id}/ENG"),
                 headers={
                     "Authorization": f"Bearer {jwt}",
@@ -1459,7 +1542,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    exit_code = main()
+    exit_code = guarded_main(main)
     manifest_path = LAST_OUTPUT_ROOT / "manifest.json"
     if manifest_path.exists():
         try:

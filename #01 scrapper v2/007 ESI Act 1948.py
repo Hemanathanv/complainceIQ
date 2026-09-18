@@ -2,6 +2,7 @@ import re
 import time
 import json
 import hashlib
+import random
 from datetime import datetime
 """
 ESI Act 1948 / ESIC document downloader
@@ -51,6 +52,10 @@ CIRCULARS = DOWNLOADS / "CIRCULARS"
 ACTS = DOWNLOADS / "ESI_ACTS_AND_REGULATIONS"
 
 LOGS = ROOT / "logs"
+RUN_STATUS = LOGS / "run_status.json"
+RUNTIME_LOG = LOGS / "runtime.log"
+RESILIENCE_ATTEMPTS = int(os.environ.get("SCRAPER_MAX_ATTEMPTS", "3"))
+BLOCK_COOLDOWN = float(os.environ.get("SCRAPER_BLOCK_COOLDOWN_SECONDS", "300"))
 
 SUCCESS_LOG = LOGS / "download_log.txt"
 FAILED_LOG = LOGS / "failed_downloads.txt"
@@ -58,6 +63,58 @@ REPORT_FILE = LOGS / "final_download_report.txt"
 FAILED_REPORT = LOGS / "failed_pdfs.txt"
 MANIFEST_FILE = LOGS / "download_manifest.json"
 EXCEL_REPORT = LOGS / "downloaded_pdfs.xlsx"
+
+
+class SiteAccessBlocked(RuntimeError):
+    pass
+
+
+BLOCK_DETECTED = ""
+
+
+def check_response_status(status, url=""):
+    global BLOCK_DETECTED
+    if status in {403, 429}:
+        BLOCK_DETECTED = f"HTTP {status} from {url}"
+        raise SiteAccessBlocked(BLOCK_DETECTED)
+
+
+def write_run_status(state, message="", attempt=0):
+    LOGS.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    payload = {"script": Path(__file__).name, "state": state, "attempt": attempt,
+               "message": str(message), "timestamp": stamp}
+    temporary = RUN_STATUS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(RUN_STATUS)
+    with RUNTIME_LOG.open("a", encoding="utf-8") as stream:
+        stream.write(f"{stamp} | {state} | attempt={attempt} | {message}\n")
+
+
+def guarded_main(entrypoint):
+    global BLOCK_DETECTED
+    for attempt in range(1, RESILIENCE_ATTEMPTS + 1):
+        BLOCK_DETECTED = ""
+        write_run_status("running", attempt=attempt)
+        try:
+            result = entrypoint()
+            if BLOCK_DETECTED:
+                raise SiteAccessBlocked(BLOCK_DETECTED)
+            write_run_status("completed", attempt=attempt)
+            return result
+        except KeyboardInterrupt:
+            write_run_status("stopped", "Stopped by user", attempt)
+            raise
+        except SiteAccessBlocked as error:
+            write_run_status("blocked", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(BLOCK_COOLDOWN + random.uniform(0, 5))
+        except Exception as error:
+            write_run_status("error", error, attempt)
+            if attempt == RESILIENCE_ATTEMPTS:
+                raise
+            time.sleep(min(120, 5 * (2 ** (attempt - 1))) + random.uniform(0, 2))
 
 
 # ============================================================
@@ -566,6 +623,8 @@ def download_using_request(
 
         status = response.status
 
+        check_response_status(status, url)
+
         body = response.body()
 
         content_type = response.headers.get(
@@ -647,6 +706,10 @@ def download_using_request(
         )
 
         return True, ""
+
+    except SiteAccessBlocked:
+
+        raise
 
     except Exception as error:
 
@@ -2504,4 +2567,4 @@ def main():
 
 if __name__ == "__main__":
 
-    main()
+    guarded_main(main)
