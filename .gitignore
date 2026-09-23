@@ -47,3 +47,7 @@ outputs/
 .DS_Store
 Thumbs.db
 uv.lock
+
+# Scraper v2 generated runtime data and temporary staging files
+**/counter/data/
+**/counter/framework/temp/
