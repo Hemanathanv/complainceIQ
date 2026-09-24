@@ -74,27 +74,6 @@ def get_row(record_uuid: UUID = Path(description="UUID from gstfetch.gstin_cache
     return dict(row)
 
 
-@app.get("/api/v1/gst-cache/{record_uuid}/state-district", tags=["gst-cache"])
-def get_state_district(
-    record_uuid: UUID = Path(description="UUID from gstfetch.gstin_cache.id"),
-) -> dict[str, Any]:
-    with db_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"SELECT state_name, district_name FROM {TABLE} WHERE id = %s",
-                (record_uuid,),
-            )
-            row = cursor.fetchone()
-
-    if row is None:
-        raise HTTPException(status_code=404, detail="GST cache row not found")
-    return {
-        "uuid": str(record_uuid),
-        "state_name": row["state_name"],
-        "district_name": row["district_name"],
-    }
-
-
 @app.get("/api/v1/gst-cache/{record_uuid}/{state_name}/{district_name}", tags=["gst-cache"])
 def get_row_by_location(
     record_uuid: UUID = Path(description="UUID from gstfetch.gstin_cache.id"),
