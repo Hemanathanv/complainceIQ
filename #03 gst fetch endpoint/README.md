@@ -57,7 +57,25 @@ Example:
 GET http://localhost:8000/api/v1/gst-cache/dc4f22aa-4682-436c-a355-743971060d2c/legal_name
 ```
 
-Supported column names include `id`, `gstin`, `business_info`, `filing_tables`, `legal_name`, `status`, `fetched_at`, `fetch_count`, and `created_at`.
+Get a row by UUID, state, and district:
+
+```text
+GET http://localhost:8000/api/v1/gst-cache/{uuid}/{state_name}/{district_name}
+```
+
+Example:
+
+```text
+GET http://localhost:8000/api/v1/gst-cache/dc4f22aa-4682-436c-a355-743971060d2c/Rajasthan/Kota
+```
+
+Get all full rows by state and district:
+
+```text
+GET http://localhost:8000/api/v1/gst-cache/Rajasthan/Kota
+```
+
+Supported column names include `id`, `gstin`, `business_info`, `filing_tables`, `legal_name`, `status`, `fetched_at`, `fetch_count`, `created_at`, `state_name`, and `district_name`.
 
 Interactive API documentation:
 
