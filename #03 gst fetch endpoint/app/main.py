@@ -23,6 +23,8 @@ ALLOWED_COLUMNS = {
     "fetched_at",
     "fetch_count",
     "created_at",
+    "state_name",
+    "district_name",
 }
 
 
@@ -70,6 +72,69 @@ def get_row(record_uuid: UUID = Path(description="UUID from gstfetch.gstin_cache
     if row is None:
         raise HTTPException(status_code=404, detail="GST cache row not found")
     return dict(row)
+
+
+@app.get("/api/v1/gst-cache/{record_uuid}/state-district", tags=["gst-cache"])
+def get_state_district(
+    record_uuid: UUID = Path(description="UUID from gstfetch.gstin_cache.id"),
+) -> dict[str, Any]:
+    with db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT state_name, district_name FROM {TABLE} WHERE id = %s",
+                (record_uuid,),
+            )
+            row = cursor.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="GST cache row not found")
+    return {
+        "uuid": str(record_uuid),
+        "state_name": row["state_name"],
+        "district_name": row["district_name"],
+    }
+
+
+@app.get("/api/v1/gst-cache/{record_uuid}/{state_name}/{district_name}", tags=["gst-cache"])
+def get_row_by_location(
+    record_uuid: UUID = Path(description="UUID from gstfetch.gstin_cache.id"),
+    state_name: str = Path(description="State name"),
+    district_name: str = Path(description="District name"),
+) -> dict[str, Any]:
+    with db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""SELECT * FROM {TABLE}
+                    WHERE id = %s
+                      AND state_name ILIKE %s
+                      AND district_name ILIKE %s""",
+                (record_uuid, state_name, district_name),
+            )
+            row = cursor.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="GST cache row or location not found")
+    return dict(row)
+
+
+@app.get("/api/v1/gst-cache/{state_name}/{district_name}", tags=["gst-cache"])
+def get_rows_by_location(
+    state_name: str = Path(description="State name"),
+    district_name: str = Path(description="District name"),
+) -> list[dict[str, Any]]:
+    with db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""SELECT * FROM {TABLE}
+                    WHERE state_name ILIKE %s
+                      AND district_name ILIKE %s""",
+                (state_name, district_name),
+            )
+            rows = cursor.fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No GST cache rows found for location")
+    return [dict(row) for row in rows]
 
 
 @app.get("/api/v1/gst-cache/{record_uuid}/{column_name}", tags=["gst-cache"])
