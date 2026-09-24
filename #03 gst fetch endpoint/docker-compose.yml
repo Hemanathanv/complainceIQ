@@ -1,0 +1,12 @@
+services:
+  gst-fetch-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gst-fetch-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-8000}:8000"
+

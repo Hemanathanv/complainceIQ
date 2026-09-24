@@ -64,3 +64,29 @@ Interactive API documentation:
 ```text
 http://localhost:8000/docs
 ```
+
+## Docker Compose
+
+Build and start the API container:
+
+```powershell
+docker compose up -d --build
+```
+
+View logs:
+
+```powershell
+docker compose logs -f gst-fetch-api
+```
+
+Stop the service:
+
+```powershell
+docker compose down
+```
+
+By default, the API is available on host port `8000`. To use another host port, add this to `.env`:
+
+```env
+API_PORT=8001
+```
