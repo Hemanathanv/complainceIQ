@@ -3,9 +3,17 @@
 #01 scrapper v1/
 
 # Generated GST results and data
-#02 fact check/gstbot/gst_results/
-#02 fact check/gstbot/gst_results/gst_27AAACR5055K1Z7.csv
-#02 fact check/gstbot/27AABCZ1506C1ZQ.json
+\#02 fact check/gstbot/gst_results/
+\#02 fact check/gstbot/gst_results/gst_27AAACR5055K1Z7.csv
+\#02 fact check/gstbot/27AABCZ1506C1ZQ.json
+\#02 fact check/gstbot/*.json
+\#02 fact check/gstbot/model/
+
+# Old endpoint-specific local Docker ignore file
+\#03 gst fetch endpoint/.dockerignore
+
+# Archived experiments
+/archive/
 
 # Python bytecode and caches
 __pycache__/
