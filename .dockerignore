@@ -1,0 +1,9 @@
+.git
+**/.venv
+**/__pycache__
+**/*.pyc
+**/gst_results
+**/output
+**/node_modules
+**/ffmpeg.exe
+**/.env

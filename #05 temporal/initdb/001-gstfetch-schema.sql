@@ -1,0 +1,22 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE SCHEMA IF NOT EXISTS gstfetch;
+
+CREATE TABLE IF NOT EXISTS gstfetch.gstin_cache (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    gstin VARCHAR(15) NOT NULL UNIQUE,
+    business_info JSONB,
+    filing_tables JSONB,
+    legal_name TEXT,
+    status TEXT,
+    fetched_at TIMESTAMPTZ,
+    fetch_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    state_name TEXT,
+    district_name TEXT
+);
+
+-- Test record corresponding to the UUID/GSTIN stored in local Infisical.
+INSERT INTO gstfetch.gstin_cache (id, gstin)
+VALUES ('0342ea1d-78f8-43c2-b112-f13e88774733', '29AAACR5056C2ZM')
+ON CONFLICT (id) DO NOTHING;
