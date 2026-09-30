@@ -1,17 +1,17 @@
-"""Read-only FastAPI endpoints for the compliance S3 bucket."""
+"""Database-backed API for SeaweedFS PDF presigned URLs."""
 
 import os
-from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from uuid import UUID
 
 import boto3
+import psycopg
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
-from starlette.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 
 load_dotenv(Path(__file__).with_name(".env"))
@@ -22,10 +22,16 @@ S3_ACCESS_KEY = os.getenv("S3_ADMIN_ACCESS")
 S3_SECRET_KEY = os.getenv("S3_ADMIN_SECRET")
 BUCKET_NAME = "compliance"
 
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+
 if not S3_ACCESS_KEY or not S3_SECRET_KEY:
-    raise RuntimeError(
-        "S3_ADMIN_ACCESS and S3_ADMIN_SECRET must be set in .env or the process environment"
-    )
+    raise RuntimeError("S3_ADMIN_ACCESS and S3_ADMIN_SECRET must be configured")
+if not all((DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)):
+    raise RuntimeError("DB_HOST, DB_PORT, DB_NAME, DB_USER, and DB_PASSWORD must be configured")
 
 s3 = boto3.client(
     "s3",
@@ -33,161 +39,184 @@ s3 = boto3.client(
     region_name=S3_REGION,
     aws_access_key_id=S3_ACCESS_KEY,
     aws_secret_access_key=S3_SECRET_KEY,
-    config=Config(connect_timeout=5, read_timeout=30),
+    config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
 )
 
 app = FastAPI(
-    title="Compliance S3 Reader",
-    description="Read-only API for listing and downloading objects from the compliance bucket.",
-    version="1.0.0",
+    title="GST Acknowledgment Document API",
+    description="Find PDF files from PostgreSQL metadata and return SeaweedFS presigned URLs.",
+    version="3.0.0",
 )
 
 
-class S3Object(BaseModel):
+class PresignedFile(BaseModel):
+    source_uuid: UUID
+    gstin: str
+    month: str | None
+    file_name: str
     key: str
-    size: int
-    last_modified: datetime
-    etag: str | None = None
+    url: str
 
 
-class ObjectList(BaseModel):
-    bucket: str
-    prefix: str
-    objects: list[S3Object]
-    next_continuation_token: str | None = None
+class PresignedUrlResponse(BaseModel):
+    company: str
+    state: str
+    district: str
+    month: str
+    financial_year: str
+    form: str
+    files: list[PresignedFile]
+    expires_in: int
 
 
-def raise_s3_http_error(exc: ClientError, *, missing_is_404: bool = False) -> None:
-    error = exc.response.get("Error", {})
-    code = error.get("Code", "S3Error")
-    message = error.get("Message", "S3 request failed")
+def get_records(
+    company: str,
+    state: str,
+    district: str,
+    month: str,
+    financial_year: str,
+) -> list[dict[str, object]]:
+    """Read matching acknowledgment records and JSON S3 form paths from PostgreSQL."""
+    with psycopg.connect(
+        host=DB_HOST,
+        port=int(DB_PORT),
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        connect_timeout=5,
+    ) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT source_uuid, gstin, month, form, s3_path
+                FROM gstacknowledge.gstin_profiles
+                WHERE LOWER(company) = LOWER(%s)
+                    AND LOWER(state_name) = LOWER(%s)
+                    AND LOWER(district_name) = LOWER(%s)
+                    AND LOWER(month) = LOWER(%s)
+                    AND LOWER(financial_year) = LOWER(%s)
+                ORDER BY month, gstin
+                """,
+                (company, state, district, month, financial_year),
+            )
+            rows = cursor.fetchall()
 
-    if code in ("AccessDenied", "Forbidden", "403"):
-        status_code = 403
-    elif missing_is_404 and code in ("NoSuchKey", "NoSuchBucket", "NotFound", "404"):
-        status_code = 404
-    else:
-        status_code = 502
-
-    raise HTTPException(status_code=status_code, detail=f"S3 {code}: {message}") from exc
-
-
-def document_prefix(company: str, state: str, month: str, form_name: str) -> str:
-    """Build the S3 prefix: company/state/month/form/."""
-    parts = (company, state, month, form_name)
-    if any(not part.strip() or "/" in part or "\\" in part for part in parts):
-        raise HTTPException(
-            status_code=422,
-            detail="Company, state, month, and form must each be one folder name.",
+    records = []
+    for source_uuid, gstin, month, forms, paths in rows:
+        records.append(
+            {
+                "source_uuid": source_uuid,
+                "gstin": gstin,
+                "month": month,
+                "forms": forms if isinstance(forms, list) else [],
+                "s3_paths": paths if isinstance(paths, list) else [],
+            }
         )
-    return "/".join(part.strip() for part in parts) + "/"
+    return records
 
 
-def stream_s3_object(key: str) -> StreamingResponse:
-    try:
-        response = s3.get_object(Bucket=BUCKET_NAME, Key=key)
-    except ClientError as exc:
-        raise_s3_http_error(exc, missing_is_404=True)
-    except BotoCoreError as exc:
-        raise HTTPException(status_code=502, detail=f"Could not reach S3: {exc}") from exc
-
-    body = response["Body"]
-    filename = quote(key.rsplit("/", 1)[-1], safe="")
-    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
-    if "ContentLength" in response:
-        headers["Content-Length"] = str(response["ContentLength"])
-
-    def stream_object():
-        try:
-            yield from body.iter_chunks(chunk_size=1024 * 1024)
-        finally:
-            body.close()
-
-    return StreamingResponse(
-        stream_object(),
-        media_type=response.get("ContentType", "application/octet-stream"),
-        headers=headers,
-    )
+def find_pdf_keys(s3_prefix: str) -> list[str]:
+    """List PDF object keys under one S3 prefix stored in PostgreSQL."""
+    paginator = s3.get_paginator("list_objects_v2")
+    keys: list[str] = []
+    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=s3_prefix):
+        for item in page.get("Contents", []):
+            key = item["Key"]
+            if key.lower().endswith(".pdf"):
+                keys.append(key)
+    return keys
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "bucket": BUCKET_NAME}
+async def health() -> dict[str, str]:
+    return {"status": "ok", "source": "PostgreSQL + SeaweedFS"}
 
 
-@app.get("/objects", response_model=ObjectList)
-def list_objects(
-    prefix: str = "",
-    max_keys: int = Query(default=100, ge=1, le=1000),
-    continuation_token: str | None = None,
-) -> ObjectList:
-    """List one page of objects. Pass the returned token to get the next page."""
-    params: dict[str, object] = {
-        "Bucket": BUCKET_NAME,
-        "Prefix": prefix,
-        "MaxKeys": max_keys,
-    }
-    if continuation_token:
-        params["ContinuationToken"] = continuation_token
-
+@app.get("/acknowledgments/presigned-url", response_model=PresignedUrlResponse)
+async def get_presigned_urls(
+    company: str = Query(description="Company code stored in PostgreSQL, for example zetwerk."),
+    state: str = Query(description="State name stored in PostgreSQL, for example Andhra Pradesh."),
+    district: str = Query(description="District name stored in PostgreSQL, for example Vizianagaram."),
+    month: str = Query(description="Month stored in PostgreSQL, for example august."),
+    financial_year: str = Query(description="Financial year stored in PostgreSQL, for example 2026-27."),
+    form: str = Query(description="Form stored in JSON, for example gstr-1."),
+    expires_in: int = Query(default=3600, ge=1, le=604800),
+) -> PresignedUrlResponse:
+    """Find PDFs by company, state, district, and form, then create presigned URLs."""
     try:
-        response = s3.list_objects_v2(**params)
-    except ClientError as exc:
-        raise_s3_http_error(exc)
-    except BotoCoreError as exc:
-        raise HTTPException(status_code=502, detail=f"Could not reach S3: {exc}") from exc
-
-    objects = [
-        S3Object(
-            key=item["Key"],
-            size=item["Size"],
-            last_modified=item["LastModified"],
-            etag=item.get("ETag"),
+        records = await run_in_threadpool(
+            get_records,
+            company,
+            state,
+            district,
+            month,
+            financial_year,
         )
-        for item in response.get("Contents", [])
-    ]
-    return ObjectList(
-        bucket=BUCKET_NAME,
-        prefix=prefix,
-        objects=objects,
-        next_continuation_token=response.get("NextContinuationToken"),
+    except (ValueError, psycopg.Error) as exc:
+        raise HTTPException(status_code=502, detail=f"Could not query PostgreSQL: {exc}") from exc
+
+    if not records:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No acknowledgment record matches the supplied company, state, district, "
+                "month, and financial year."
+            ),
+        )
+
+    prefixes: list[tuple[dict[str, object], str]] = []
+    for record in records:
+        forms = record["forms"]
+        paths = record["s3_paths"]
+        if len(forms) != len(paths):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Form and S3 path lists have different lengths for GSTIN {record['gstin']}.",
+            )
+
+        try:
+            form_index = [str(value).casefold() for value in forms].index(form.casefold())
+        except ValueError:
+            continue
+        prefixes.append((record, str(paths[form_index]).rstrip("/") + "/"))
+
+    if not prefixes:
+        raise HTTPException(status_code=404, detail=f"Form '{form}' is not stored for the matching record.")
+
+    files: list[PresignedFile] = []
+    try:
+        for record, prefix in prefixes:
+            keys = await run_in_threadpool(find_pdf_keys, prefix)
+            for key in keys:
+                url = await run_in_threadpool(
+                    s3.generate_presigned_url,
+                    ClientMethod="get_object",
+                    Params={"Bucket": BUCKET_NAME, "Key": key},
+                    ExpiresIn=expires_in,
+                )
+                files.append(
+                    PresignedFile(
+                        source_uuid=record["source_uuid"],
+                        gstin=str(record["gstin"]),
+                        month=record["month"],
+                        file_name=key.rsplit("/", 1)[-1],
+                        key=key,
+                        url=url,
+                    )
+                )
+    except (ClientError, BotoCoreError) as exc:
+        raise HTTPException(status_code=502, detail=f"Could not access SeaweedFS: {exc}") from exc
+
+    if not files:
+        raise HTTPException(status_code=404, detail="No PDFs found under the matching S3 folder.")
+
+    return PresignedUrlResponse(
+        company=company,
+        state=state,
+        district=district,
+        month=month,
+        financial_year=financial_year,
+        form=form,
+        files=files,
+        expires_in=expires_in,
     )
-
-
-@app.get("/documents/{company}/{state}/{month}/{form_name}", response_model=ObjectList)
-def list_document_files(
-    company: str,
-    state: str,
-    month: str,
-    form_name: str,
-    max_keys: int = Query(default=100, ge=1, le=1000),
-    continuation_token: str | None = None,
-) -> ObjectList:
-    """List files under company/state/month/form/."""
-    prefix = document_prefix(company, state, month, form_name)
-    return list_objects(
-        prefix=prefix,
-        max_keys=max_keys,
-        continuation_token=continuation_token,
-    )
-
-
-@app.get("/documents/{company}/{state}/{month}/{form_name}/files/{file_path:path}")
-def download_document_file(
-    company: str,
-    state: str,
-    month: str,
-    form_name: str,
-    file_path: str,
-) -> StreamingResponse:
-    """Download a file below company/state/month/form/."""
-    prefix = document_prefix(company, state, month, form_name)
-    if not file_path or file_path.startswith("/") or "\\" in file_path:
-        raise HTTPException(status_code=422, detail="file_path must be a valid S3 object path.")
-    return stream_s3_object(prefix + file_path)
-
-
-@app.get("/objects/{key:path}")
-def download_object(key: str) -> StreamingResponse:
-    """Download an object by its full S3 key, such as zetwerk/docs/file.pdf."""
-    return stream_s3_object(key)
