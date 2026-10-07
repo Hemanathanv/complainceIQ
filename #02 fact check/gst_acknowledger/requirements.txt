@@ -1,0 +1,7 @@
+playwright
+python-dotenv
+pytest
+pytest-rerunfailures
+numpy
+openai-whisper
+miniaudio

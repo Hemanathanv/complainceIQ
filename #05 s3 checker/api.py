@@ -2,7 +2,6 @@
 
 import os
 from pathlib import Path
-from uuid import UUID
 
 import boto3
 import psycopg
@@ -10,8 +9,8 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import JSONResponse
 
 
 load_dotenv(Path(__file__).with_name(".env"))
@@ -49,26 +48,6 @@ app = FastAPI(
 )
 
 
-class PresignedFile(BaseModel):
-    source_uuid: UUID
-    gstin: str
-    month: str | None
-    file_name: str
-    key: str
-    url: str
-
-
-class PresignedUrlResponse(BaseModel):
-    company: str
-    state: str
-    district: str
-    month: str
-    financial_year: str
-    form: str
-    files: list[PresignedFile]
-    expires_in: int
-
-
 def get_records(
     company: str,
     state: str,
@@ -88,7 +67,7 @@ def get_records(
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT source_uuid, gstin, month, form, s3_path
+                SELECT gstin, form, s3_path
                 FROM gstacknowledge.gstin_profiles
                 WHERE LOWER(company) = LOWER(%s)
                     AND LOWER(state_name) = LOWER(%s)
@@ -102,12 +81,10 @@ def get_records(
             rows = cursor.fetchall()
 
     records = []
-    for source_uuid, gstin, month, forms, paths in rows:
+    for gstin, forms, paths in rows:
         records.append(
             {
-                "source_uuid": source_uuid,
                 "gstin": gstin,
-                "month": month,
                 "forms": forms if isinstance(forms, list) else [],
                 "s3_paths": paths if isinstance(paths, list) else [],
             }
@@ -132,7 +109,7 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "source": "PostgreSQL + SeaweedFS"}
 
 
-@app.get("/acknowledgments/presigned-url", response_model=PresignedUrlResponse)
+@app.get("/acknowledgments/presigned-url", response_class=JSONResponse)
 async def get_presigned_urls(
     company: str = Query(description="Company code stored in PostgreSQL, for example zetwerk."),
     state: str = Query(description="State name stored in PostgreSQL, for example Andhra Pradesh."),
@@ -141,8 +118,8 @@ async def get_presigned_urls(
     financial_year: str = Query(description="Financial year stored in PostgreSQL, for example 2026-27."),
     form: str = Query(description="Form stored in JSON, for example gstr-1."),
     expires_in: int = Query(default=3600, ge=1, le=604800),
-) -> PresignedUrlResponse:
-    """Find PDFs by company, state, district, and form, then create presigned URLs."""
+) -> dict[str, object]:
+    """Return matching PDF names and SeaweedFS presigned URLs."""
     try:
         records = await run_in_threadpool(
             get_records,
@@ -183,7 +160,7 @@ async def get_presigned_urls(
     if not prefixes:
         raise HTTPException(status_code=404, detail=f"Form '{form}' is not stored for the matching record.")
 
-    files: list[PresignedFile] = []
+    files: list[dict[str, str]] = []
     try:
         for record, prefix in prefixes:
             keys = await run_in_threadpool(find_pdf_keys, prefix)
@@ -195,14 +172,10 @@ async def get_presigned_urls(
                     ExpiresIn=expires_in,
                 )
                 files.append(
-                    PresignedFile(
-                        source_uuid=record["source_uuid"],
-                        gstin=str(record["gstin"]),
-                        month=record["month"],
-                        file_name=key.rsplit("/", 1)[-1],
-                        key=key,
-                        url=url,
-                    )
+                    {
+                        "file_name": key.rsplit("/", 1)[-1],
+                        "url": url,
+                    }
                 )
     except (ClientError, BotoCoreError) as exc:
         raise HTTPException(status_code=502, detail=f"Could not access SeaweedFS: {exc}") from exc
@@ -210,13 +183,4 @@ async def get_presigned_urls(
     if not files:
         raise HTTPException(status_code=404, detail="No PDFs found under the matching S3 folder.")
 
-    return PresignedUrlResponse(
-        company=company,
-        state=state,
-        district=district,
-        month=month,
-        financial_year=financial_year,
-        form=form,
-        files=files,
-        expires_in=expires_in,
-    )
+    return {"files": files, "expires_in": expires_in}
