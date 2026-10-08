@@ -1,0 +1,141 @@
+services:
+  complaince-api:
+    image: complaince-iq-api:manual
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    environment:
+      API_ROLE: public
+    networks:
+      - default
+      - shared-db
+    ports:
+      - "${API_PORT:-8020}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  complaince-api-internal:
+    image: complaince-iq-api:manual
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    environment:
+      API_ROLE: internal
+      INFISICAL_API_URL: http://infisical:8080
+    networks:
+      - default
+      - shared-db
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  infisical-migration:
+    image: infisical/infisical:latest-postgres
+    env_file: .env
+    networks:
+      - default
+      - shared-db
+    environment:
+      DB_CONNECTION_URI: ${INFISICAL_DB_CONNECTION_URI}
+      REDIS_URL: ${REDIS_URL}
+    command: ["npm", "run", "migration:latest"]
+
+  infisical:
+    image: infisical/infisical:latest-postgres
+    env_file: .env
+    networks:
+      - default
+      - shared-db
+    environment:
+      DB_CONNECTION_URI: ${INFISICAL_DB_CONNECTION_URI}
+      REDIS_URL: ${REDIS_URL}
+    depends_on:
+      infisical-migration:
+        condition: service_completed_successfully
+    ports:
+      - "18080:8080"
+
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    networks:
+      - default
+      - shared-db
+    environment:
+      BIND_ON_IP: 0.0.0.0
+      DB: postgres12
+      DB_PORT: ${DB_PORT:-5432}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PWD: ${DB_PASSWORD}
+      POSTGRES_SEEDS: ${DB_HOST}
+    ports:
+      - "17233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CSRF_COOKIE_INSECURE: "true"
+    ports:
+      - "18088:8080"
+
+  worker:
+    image: complaince-iq-temporal-worker:manual
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    environment:
+      TEMPORAL_SERVER: temporal:7233
+      GST_FETCH_API_URL: http://complaince-api-internal:8000
+      INFISICAL_API_URL: http://infisical:8080
+    depends_on:
+      temporal:
+        condition: service_started
+      complaince-api-internal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  gst-evidence-worker:
+    image: complaince-iq-temporal-worker:manual
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    environment:
+      TEMPORAL_SERVER: temporal:7233
+      INFISICAL_API_URL: http://infisical:8080
+      GST_EVIDENCE_API_URL: http://complaince-api-internal:8000
+      GST_EVIDENCE_COMPANY: ${GST_EVIDENCE_COMPANY:-zetwerk}
+    command: ["sh", "/app/temporal/start_gst_evidence_worker.sh"]
+    depends_on:
+      temporal:
+        condition: service_started
+      infisical:
+        condition: service_started
+    restart: unless-stopped
+
+networks:
+  default: {}
+  shared-db:
+    name: ewms-network
+    external: true

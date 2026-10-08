@@ -22,7 +22,7 @@ from playwright.sync_api import sync_playwright
 START_URL = "https://parivesh.nic.in/#/dw-act-rule"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ENV_FILE = SCRIPT_DIR / ".env"
+ENV_FILE = next(parent / ".env" for parent in Path(__file__).resolve().parents if (parent / "docker-compose.yml").is_file())
 if ENV_FILE.exists():
     for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()

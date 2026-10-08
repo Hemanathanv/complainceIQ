@@ -1,0 +1,96 @@
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+  previewFeatures      = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["Automation", "public"]
+}
+
+model GstFetch {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  gstin         String    @unique @db.VarChar(15)
+  sourceKey     String?   @unique @map("source_key")
+  sourceName    String?   @map("source_name")
+  isActive      Boolean   @default(true) @map("is_active")
+  syncedAt      DateTime? @map("synced_at") @db.Timestamptz(6)
+  businessInfo  Json?     @map("business_info") @db.JsonB
+  filingTables  Json?     @map("filing_tables") @db.JsonB
+  legalName     String?   @map("legal_name")
+  status        String?
+  fetchedAt     DateTime? @map("fetched_at") @db.Timestamptz(6)
+  fetchCount    Int       @default(0) @map("fetch_count")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  stateName     String?   @map("state_name")
+  districtName  String?   @map("district_name")
+
+  @@map("gstFetch")
+  @@schema("Automation")
+}
+
+model ApiClient {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name           String    @unique
+  keyPrefix      String    @map("key_prefix")
+  keyHash        String    @unique @map("key_hash")
+  allowedOrigins String[] @default([]) @map("allowed_origins")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt     DateTime? @map("last_used_at") @db.Timestamptz(6)
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz(6)
+  sessions       ApiSession[]
+  requests       ApiRequestAudit[]
+
+  @@map("api_clients")
+  @@schema("public")
+}
+
+model ApiSession {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clientId    String    @map("client_id") @db.Uuid
+  keyHashAtIssue String @map("key_hash_at_issue")
+  refreshHash String    @unique @map("refresh_hash")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  client      ApiClient @relation(fields: [clientId], references: [id])
+  requests    ApiRequestAudit[]
+
+  @@index([clientId])
+  @@map("api_sessions")
+  @@schema("public")
+}
+
+model ApiRequestAudit {
+  id         BigInt   @id @default(autoincrement())
+  clientId   String   @map("client_id") @db.Uuid
+  sessionId  String?  @map("session_id") @db.Uuid
+  method     String
+  path       String
+  statusCode Int      @map("status_code")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  client     ApiClient @relation(fields: [clientId], references: [id])
+  session    ApiSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, createdAt])
+  @@map("api_request_audit")
+  @@schema("public")
+}
+
+model GstEvidence {
+  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  gstin         String?
+  company       String?
+  stateName     String? @map("state_name")
+  districtName  String? @map("district_name")
+  month         String?
+  financialYear String? @map("financial_year")
+  form          Json?   @db.JsonB
+  s3Path        Json?   @map("s3_path") @db.JsonB
+
+  @@map("gstEvidence")
+  @@schema("Automation")
+}

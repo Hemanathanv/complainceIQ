@@ -29,7 +29,7 @@ ENV/
 # Environment files and secrets
 .env
 .env.*
-!.env.example
+.local-api-keys/
 
 # Test and coverage artifacts
 .pytest_cache/

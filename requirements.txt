@@ -1,0 +1,25 @@
+# Shared application, API, Temporal, and browser-worker dependencies
+boto3>=1.35
+beautifulsoup4>=4.12
+fastapi>=0.115
+imageio-ffmpeg>=0.6.0
+loguru>=0.7
+miniaudio
+numpy
+openai-whisper>=20240930
+openpyxl>=3.1.0
+pandas>=2.0
+playwright>=1.40
+PyJWT>=2.10,<3
+psycopg[binary]>=3.2
+prisma>=0.15,<0.16
+python-dotenv>=1.0
+pytest
+pytest-rerunfailures
+requests>=2.31,<3
+temporalio>=1.8,<2
+torch==2.14.0+cpu
+urllib3>=2.0.0
+uvicorn[standard]>=0.30
+
+--extra-index-url https://download.pytorch.org/whl/cpu

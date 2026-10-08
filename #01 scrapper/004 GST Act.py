@@ -36,12 +36,12 @@ from playwright.sync_api import sync_playwright
 BASE_URL = "https://taxinformation.cbic.gov.in/"
 GST_TAX_ID = 1000001
 SCRIPT_DIR = Path(__file__).resolve().parent
-ENV_FILE = SCRIPT_DIR / ".env"
+ENV_FILE = next(parent / ".env" for parent in Path(__file__).resolve().parents if (parent / "docker-compose.yml").is_file())
 if ENV_FILE.exists():
     for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
         if "=" in line and not line.strip().startswith("#"):
             key, value = line.split("=", 1)
-            # The script-local .env is authoritative for this scraper.
+            # The shared repository .env is authoritative for this scraper.
             os.environ[key.strip()] = value.strip().strip('"')
 DOWNLOAD_BASE = Path(os.environ.get("DOWNLOAD_BASE_PATH", SCRIPT_DIR))
 DEFAULT_OUTPUT = DOWNLOAD_BASE / Path(__file__).stem

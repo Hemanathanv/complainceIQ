@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app
+COPY ["requirements.txt", "/app/requirements.txt"]
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --default-timeout=100 --retries=10 -r /app/requirements.txt
+RUN playwright install --with-deps chromium
+COPY ["temporal", "/app/temporal"]
+COPY ["worker/gstFactCheck", "/app/worker/gstFactCheck"]
+COPY ["worker/gstEvidence/gstEvidence.py", "/app/worker/gstEvidence/gstEvidence.py"]
+RUN python -c "import whisper; whisper.load_model('base', download_root='/app/worker/gstEvidence/model')"
+CMD ["sh", "/app/temporal/start_worker.sh"]

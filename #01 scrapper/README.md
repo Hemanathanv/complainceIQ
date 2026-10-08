@@ -6,8 +6,8 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first, the
 
 ```powershell
 uv venv
-uv sync
-uv run playwright install chromium
+uv pip install --python .venv/Scripts/python.exe -r ../requirements.txt
+.venv/Scripts/python.exe -m playwright install chromium
 ```
 
 Activate the environment when needed:
@@ -16,12 +16,14 @@ Activate the environment when needed:
 .\.venv\Scripts\Activate.ps1
 ```
 
-Copy `.env.example` to `.env` and adjust the download path or scraper settings before running a scraper.
+Scrapers use the repository root `.env`; no scraper-specific env file is needed.
+Optional settings include `DOWNLOAD_BASE_PATH`, `SCRAPER_MAX_ATTEMPTS`,
+`SCRAPER_REQUEST_DELAY_SECONDS`, and `SCRAPER_BLOCK_COOLDOWN_SECONDS`.
 
 Example:
 
 ```powershell
-uv run python ".\004 GST Act.py"
+.venv/Scripts/python.exe ".\004 GST Act.py"
 ```
 
 ## Built-in resilience
